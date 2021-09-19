@@ -2,7 +2,7 @@
 // 	go run github.com/veqryn/string-dedup/cmd
 // or
 // 	go build -o ./dedup github.com/veqryn/string-dedup/cmd
-// 	./dedup --in=testdata.log --out=deduped.log
+// 	./dedup --in=testdata/testdata.log --out=deduped.log
 package main
 
 import (

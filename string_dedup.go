@@ -13,13 +13,9 @@ import (
 	"os"
 )
 
-// TODO: remove
-// analyze file, get size or line count or something
-// split into reasonable sized files or random-access or memory mapped files
-// for each file, remove duplicates while sorting in memory, and output to a new file
-// for each new file, read them all in simulanteously, removing duplicates and advancing the pointer in each file, and outputting to the final file
-
-// Dedup ...
+// Dedup is given a file to read from, and a file to write to. It will then de-duplicate strings/URL's
+// by splitting the input file into smaller temporary files, deduplicating each file into additional
+// temporary files, then merge the deduplicated files into a large one while deduplicating it.
 func Dedup(inFile, outFile *os.File, maxTmpFileLines uint) error {
 	// Split file into smaller ones
 	chunks, err := split(inFile, maxTmpFileLines)
@@ -36,6 +32,10 @@ func Dedup(inFile, outFile *os.File, maxTmpFileLines uint) error {
 		}
 
 		dedupedChunks = append(dedupedChunks, deduped)
+
+		// Cleanup temporary files
+		chunk.Close()
+		os.Remove(chunk.Name())
 	}
 
 	// Merge the deduplicated files into a larger final duplicated file
@@ -46,9 +46,7 @@ func Dedup(inFile, outFile *os.File, maxTmpFileLines uint) error {
 	return nil
 }
 
-// TODO: close temp files and delete them
-// defer os.Remove(f.Name())
-
+// split takes one large file, and splits its content into multiple smaller files
 func split(f *os.File, maxTmpFileLines uint) ([]*os.File, error) {
 	var smallChunks []*os.File
 	var currentChunkWriter *bufio.Writer
@@ -80,7 +78,7 @@ func split(f *os.File, maxTmpFileLines uint) ([]*os.File, error) {
 			i = 0
 		}
 
-		_, err = currentChunkWriter.Write(scanner.Bytes())
+		_, err = currentChunkWriter.WriteString(scanner.Text() + "\n")
 		if err != nil {
 			return smallChunks, err
 		}
@@ -97,7 +95,15 @@ func split(f *os.File, maxTmpFileLines uint) ([]*os.File, error) {
 	return smallChunks, scanner.Err()
 }
 
+// removeDuplicates takes a single file, reads in the lines one by one, deduplicating as it goes,
+// the writes the resulting deduplicated lines to a new temporary file
 func removeDuplicates(f *os.File) (*os.File, error) {
+	// Seed to the beginning of the file to start reading from the beginning
+	_, err := f.Seek(0, 0)
+	if err != nil {
+		return nil, err
+	}
+
 	scanner := bufio.NewScanner(f)
 
 	// Use a hash set to remove duplicates
@@ -118,7 +124,7 @@ func removeDuplicates(f *os.File) (*os.File, error) {
 	// Write deduplicated lines
 	dedupedChunkWriter := bufio.NewWriter(dedupedChunkFile)
 	for key := range dedupSet {
-		_, err = dedupedChunkWriter.WriteString(key)
+		_, err = dedupedChunkWriter.WriteString(key + "\n")
 		if err != nil {
 			return dedupedChunkFile, err
 		}
@@ -133,10 +139,19 @@ func removeDuplicates(f *os.File) (*os.File, error) {
 	return dedupedChunkFile, nil
 }
 
+// mergeChunks takes multiple small files, and merges them into a single large one,
+// deduplicating lines as it goes
 func mergeChunks(chunks []*os.File, out *os.File) error {
 	// Use a hash set to remove duplicates
 	dedupSet := make(map[string]struct{})
 	for _, dedupChunk := range chunks {
+		// Seed to the beginning of the file to start reading from the beginning
+		_, err := dedupChunk.Seek(0, 0)
+		if err != nil {
+			return err
+		}
+
+		// Scan lines one by one, and put into hash set
 		scanner := bufio.NewScanner(dedupChunk)
 		for scanner.Scan() {
 			dedupSet[scanner.Text()] = struct{}{}
@@ -144,12 +159,16 @@ func mergeChunks(chunks []*os.File, out *os.File) error {
 		if err := scanner.Err(); err != nil {
 			return err
 		}
+
+		// Cleanup temporary files
+		dedupChunk.Close()
+		os.Remove(dedupChunk.Name())
 	}
 
 	// Write deduplicated lines
 	dedupedChunkWriter := bufio.NewWriter(out)
 	for key := range dedupSet {
-		_, err := dedupedChunkWriter.WriteString(key)
+		_, err := dedupedChunkWriter.WriteString(key + "\n")
 		if err != nil {
 			return err
 		}
