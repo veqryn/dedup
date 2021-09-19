@@ -51,34 +51,86 @@ func Dedup(inFile, outFile *os.File, maxTmpFileLines uint) error {
 
 func split(f *os.File, maxTmpFileLines uint) ([]*os.File, error) {
 	var smallChunks []*os.File
-	var currentChunk *os.File
+	var currentChunkWriter *bufio.Writer
 	var err error
 
 	// Line scanner, with max line size defined by bufio.MaxScanTokenSize (64k)
 	scanner := bufio.NewScanner(f)
 
-	var i uint
+	var i uint // Lines written
 	for scanner.Scan() {
-		if currentChunk == nil || i >= maxTmpFileLines {
-			currentChunk, err = os.CreateTemp("", "dups.small.*.log")
+		if currentChunkWriter == nil || i >= maxTmpFileLines {
+			// Flush the current writer if there is one
+			if currentChunkWriter != nil {
+				err = currentChunkWriter.Flush()
+				if err != nil {
+					return smallChunks, err
+				}
+			}
+
+			// Create a new temporary file
+			currentChunkFile, err := os.CreateTemp("", "dups.small.*.log")
 			if err != nil {
 				return smallChunks, err
 			}
-			smallChunks = append(smallChunks, currentChunk)
+
+			// Buffer the writes
+			currentChunkWriter = bufio.NewWriter(currentChunkFile)
+			smallChunks = append(smallChunks, currentChunkFile)
 			i = 0
 		}
 
-		_, err = currentChunk.WriteString(scanner.Text() + "\n")
+		_, err = currentChunkWriter.Write(scanner.Bytes())
 		if err != nil {
 			return smallChunks, err
 		}
 		i++
 	}
+
+	// Flush the last writer
+	if currentChunkWriter != nil {
+		err = currentChunkWriter.Flush()
+		if err != nil {
+			return smallChunks, err
+		}
+	}
 	return smallChunks, scanner.Err()
 }
 
 func removeDuplicates(f *os.File) (*os.File, error) {
-	return nil, nil
+	scanner := bufio.NewScanner(f)
+
+	// Use a hash set to remove duplicates
+	dedupSet := make(map[string]struct{})
+	for scanner.Scan() {
+		dedupSet[scanner.Text()] = struct{}{}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	// Create a new temporary file
+	dedupedChunkFile, err := os.CreateTemp("", "dedup.small.*.log")
+	if err != nil {
+		return nil, err
+	}
+
+	// Write deduplicated lines
+	dedupedChunkWriter := bufio.NewWriter(dedupedChunkFile)
+	for key := range dedupSet {
+		_, err = dedupedChunkFile.WriteString(key)
+		if err != nil {
+			return dedupedChunkFile, err
+		}
+	}
+
+	// Flush the last writer
+	err = dedupedChunkWriter.Flush()
+	if err != nil {
+		return dedupedChunkFile, err
+	}
+
+	return dedupedChunkFile, nil
 }
 
 func mergeChunks(chunks []*os.File, out *os.File) error {
