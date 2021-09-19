@@ -118,7 +118,7 @@ func removeDuplicates(f *os.File) (*os.File, error) {
 	// Write deduplicated lines
 	dedupedChunkWriter := bufio.NewWriter(dedupedChunkFile)
 	for key := range dedupSet {
-		_, err = dedupedChunkFile.WriteString(key)
+		_, err = dedupedChunkWriter.WriteString(key)
 		if err != nil {
 			return dedupedChunkFile, err
 		}
@@ -134,5 +134,27 @@ func removeDuplicates(f *os.File) (*os.File, error) {
 }
 
 func mergeChunks(chunks []*os.File, out *os.File) error {
-	return nil
+	// Use a hash set to remove duplicates
+	dedupSet := make(map[string]struct{})
+	for _, dedupChunk := range chunks {
+		scanner := bufio.NewScanner(dedupChunk)
+		for scanner.Scan() {
+			dedupSet[scanner.Text()] = struct{}{}
+		}
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+	}
+
+	// Write deduplicated lines
+	dedupedChunkWriter := bufio.NewWriter(out)
+	for key := range dedupSet {
+		_, err := dedupedChunkWriter.WriteString(key)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Flush the last writer
+	return dedupedChunkWriter.Flush()
 }
