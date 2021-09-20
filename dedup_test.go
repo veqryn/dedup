@@ -21,7 +21,7 @@ func TestDedup(t *testing.T) {
 	defer outFile.Close()
 
 	// testdata.log has 100 distinct lines, 204 total lines. Try to dedup 20 lines at a time
-	err = Dedup(inFile, outFile, 20)
+	err = Dedup(inFile, outFile, 20*50)
 	if err != nil {
 		t.Fatal()
 	}
