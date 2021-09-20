@@ -11,171 +11,250 @@ package dedup
 import (
 	"bufio"
 	"os"
+	"sort"
 )
 
-// Dedup is given a file to read from, and a file to write to. It will then de-duplicatestrings/URL's
-// by splitting the input file into smaller temporary files (as defined by maxTmpFileLines),
-// deduplicating each file into additional temporary files, then merge the deduplicated files into a
-// large one while deduplicating it.
-func Dedup(inFile, outFile *os.File, maxTmpFileLines uint) error {
+const defaultBufferSize int = 256 * 1024 // 256 kb
 
-	// Split file into smaller ones
-	chunks, err := split(inFile, maxTmpFileLines)
+var delimiter byte = "\n"[0]
+
+// Dedup is given a file to read from, a file to write to, and the average temporary file size
+// for when it needs to spill to disk. It will de-duplicate strings/URL's by reading the input file
+// into a set, and writing out the set to a temporary file each time the set approaches avgTmpFileBytes
+// in size. It will then merge the temporary files while deduplicating the lines, into the final file.
+func Dedup(inFile, outFile *os.File, avgTmpFileBytes int64) error {
+
+	chunks, err := splitSortDeduplicate(inFile, outFile, avgTmpFileBytes)
 	if err != nil {
 		return err
 	}
 
-	// Deduplicate the smaller files
-	dedupedChunks := make([]*os.File, 0, len(chunks))
-	for _, chunk := range chunks {
-		deduped, err := removeDuplicates(chunk)
-		if err != nil {
-			return err
-		}
-
-		dedupedChunks = append(dedupedChunks, deduped)
-
-		// Cleanup temporary files
-		chunk.Close()
-		os.Remove(chunk.Name())
+	// If the input file was empty, exit
+	if len(chunks) < 1 {
+		return nil
 	}
 
-	// Merge the deduplicated files into a larger final duplicated file
-	err = mergeChunks(dedupedChunks, outFile)
-	if err != nil {
-		return err
-	}
-	return nil
+	return mergeChunks(chunks, outFile)
 }
 
-// split takes one large file, and splits its content into multiple smaller files
-func split(f *os.File, maxTmpFileLines uint) ([]*os.File, error) {
-	var smallChunks []*os.File
-	var currentChunkWriter *bufio.Writer
-	var err error
+func splitSortDeduplicate(inFile, outFile *os.File, avgTmpFileBytes int64) ([]*os.File, error) {
+	// Create a scanner to buffer the input file and read in line tokens
+	scanner := bufio.NewScanner(inFile)
 
-	// Line scanner, with max line size defined by bufio.MaxScanTokenSize (64k)
-	scanner := bufio.NewScanner(f)
+	// Set scanner's buffer size to be a bit larger
+	scanner.Buffer(make([]byte, 0, defaultBufferSize), bufio.MaxScanTokenSize)
 
-	var i uint // Lines written
+	// Create a hash set (map with empty values) with decent initial size
+	set := make(map[string]struct{}, 1024)
+
+	// Create counters and a slice of temporary files being created
+	var (
+		chunks      []*os.File
+		bytesUsed   int64
+		previousLen int
+		currentLen  int
+	)
+
+	// Read lines from the scanner one by one, putting them into the set
 	for scanner.Scan() {
-		if currentChunkWriter == nil || i >= maxTmpFileLines {
-			// Flush the current writer if there is one
-			if currentChunkWriter != nil {
-				err = currentChunkWriter.Flush()
+		// Add to the set
+		line := scanner.Text()
+		set[line] = struct{}{}
+
+		// The length of a map is stored in the map (in golang), so the operation is nearly free
+		currentLen = len(set)
+
+		// If the length of the set increased, add the byte length of the string to the memory counter
+		if currentLen > previousLen {
+			bytesUsed += int64(len(line))
+
+			// If the total bytes of all distinct strings in the set are greater than we want, spill to a new temp file
+			if bytesUsed >= avgTmpFileBytes {
+				// Create a new temporary file
+				chunkFile, err := os.CreateTemp("", "deduped.*.log")
 				if err != nil {
-					return smallChunks, err
+					return chunks, err
 				}
+				chunks = append(chunks, chunkFile)
+
+				// Sort and write to file
+				err = writeSlice(chunkFile, sortKeys(set))
+				if err != nil {
+					return chunks, err
+				}
+
+				// Overwrite the set so the old one can be GC'ed, reset counters
+				set = make(map[string]struct{}, 1024)
+				bytesUsed = 0
+				currentLen = 0
 			}
-
-			// Create a new temporary file
-			currentChunkFile, err := os.CreateTemp("", "dups.small.*.log")
-			if err != nil {
-				return smallChunks, err
-			}
-
-			// Buffer the writes
-			currentChunkWriter = bufio.NewWriter(currentChunkFile)
-			smallChunks = append(smallChunks, currentChunkFile)
-			i = 0
 		}
-
-		_, err = currentChunkWriter.WriteString(scanner.Text() + "\n")
-		if err != nil {
-			return smallChunks, err
-		}
-		i++
+		previousLen = currentLen
 	}
-
-	// Flush the last writer
-	if currentChunkWriter != nil {
-		err = currentChunkWriter.Flush()
-		if err != nil {
-			return smallChunks, err
-		}
-	}
-	return smallChunks, scanner.Err()
-}
-
-// removeDuplicates takes a single file, reads in the lines one by one, deduplicating as it goes,
-// the writes the resulting deduplicated lines to a new temporary file
-func removeDuplicates(f *os.File) (*os.File, error) {
-	// Seed to the beginning of the file to start reading from the beginning
-	_, err := f.Seek(0, 0)
+	err := scanner.Err()
 	if err != nil {
-		return nil, err
+		return chunks, err
 	}
 
-	scanner := bufio.NewScanner(f)
-
-	// Use a hash set to remove duplicates
-	dedupSet := make(map[string]struct{})
-	for scanner.Scan() {
-		dedupSet[scanner.Text()] = struct{}{}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	// If there are no more strings, return
+	if len(set) == 0 {
+		return chunks, nil
 	}
 
 	// Create a new temporary file
-	dedupedChunkFile, err := os.CreateTemp("", "dedup.small.*.log")
+	finalChunk, err := os.CreateTemp("", "deduped.*.log")
 	if err != nil {
-		return nil, err
+		return chunks, err
 	}
+	chunks = append(chunks, finalChunk)
 
-	// Write deduplicated lines
-	dedupedChunkWriter := bufio.NewWriter(dedupedChunkFile)
-	for key := range dedupSet {
-		_, err = dedupedChunkWriter.WriteString(key + "\n")
-		if err != nil {
-			return dedupedChunkFile, err
-		}
-	}
-
-	// Flush the last writer
-	err = dedupedChunkWriter.Flush()
-	if err != nil {
-		return dedupedChunkFile, err
-	}
-
-	return dedupedChunkFile, nil
+	// Write any remaining distinct strings
+	return chunks, writeSlice(finalChunk, sortKeys(set))
 }
 
-// mergeChunks takes multiple small files, and merges them into a single large one,
-// deduplicating lines as it goes
-func mergeChunks(chunks []*os.File, out *os.File) error {
-	// Use a hash set to remove duplicates
-	dedupSet := make(map[string]struct{})
-	for _, dedupChunk := range chunks {
+func sortKeys(set map[string]struct{}) []string {
+	// Put into an array/slice so it can be sorted
+	slice := make([]string, len(set))
+	i := 0
+	for k := range set {
+		slice[i] = k
+		i++
+	}
+
+	// Sort in place
+	sort.Strings(slice)
+	return slice
+}
+
+func writeSlice(f *os.File, slice []string) error {
+	// Buffer the writes
+	writer := bufio.NewWriterSize(f, defaultBufferSize)
+	var line string
+	var err error
+
+	// Write to temporary file
+	for _, line = range slice {
+		// Write line
+		_, err = writer.WriteString(line)
+		if err != nil {
+			return err
+		}
+
+		// Write delimiter
+		err = writer.WriteByte(delimiter)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Flush all remaining bytes to the file
+	return writer.Flush()
+}
+
+func mergeChunks(chunks []*os.File, outFile *os.File) error {
+	// Create a slice of buffered scanners for each chunk
+	scanners := make([]*sortableScanner, 0, len(chunks))
+	var ok bool
+	var err error
+
+	// No matter how we exit, cleanup all remaining temporary files
+	defer func() {
+		for _, ss := range scanners {
+			ss.f.Close()
+			os.Remove(ss.f.Name())
+		}
+	}()
+
+	// Initialize and add sorted scanners
+	for _, chunk := range chunks {
 		// Seed to the beginning of the file to start reading from the beginning
-		_, err := dedupChunk.Seek(0, 0)
+		_, err = chunk.Seek(0, 0)
 		if err != nil {
 			return err
 		}
 
-		// Scan lines one by one, and put into hash set
-		scanner := bufio.NewScanner(dedupChunk)
-		for scanner.Scan() {
-			dedupSet[scanner.Text()] = struct{}{}
-		}
-		if err := scanner.Err(); err != nil {
-			return err
+		// Use default buffer size since we may have many chunks
+		ss := &sortableScanner{
+			scanner: bufio.NewScanner(chunk),
+			f:       chunk,
 		}
 
-		// Cleanup temporary files
-		dedupChunk.Close()
-		os.Remove(dedupChunk.Name())
-	}
-
-	// Write deduplicated lines
-	dedupedChunkWriter := bufio.NewWriter(out)
-	for key := range dedupSet {
-		_, err := dedupedChunkWriter.WriteString(key + "\n")
+		// Scan the next value
+		ok, err = ss.next()
 		if err != nil {
 			return err
 		}
+
+		// If the file has content, add to the slice
+		if ok {
+			scanners = append(scanners, ss)
+		}
 	}
 
-	// Flush the last writer
-	return dedupedChunkWriter.Flush()
+	// Create function to sort the scanners
+	sortScanners := func(i, j int) bool {
+		return scanners[i].token < scanners[j].token
+	}
+
+	// Create a buffered writer
+	writer := bufio.NewWriterSize(outFile, defaultBufferSize)
+	var previousLine string
+	var hasPrevious bool
+
+	// Loop until there aren't any scanners left
+	for len(scanners) > 0 {
+		// Sort the scanners
+		if len(scanners) > 1 {
+			sort.Slice(scanners, sortScanners)
+		}
+
+		// Pull the top token string, and compare to the previous line
+		if !hasPrevious || previousLine != scanners[0].token {
+			// Write to the output buffer
+			_, err = writer.WriteString(scanners[0].token)
+			if err != nil {
+				return err
+			}
+
+			// Write delimiter
+			err = writer.WriteByte(delimiter)
+			if err != nil {
+				return err
+			}
+			previousLine = scanners[0].token
+			hasPrevious = true
+		}
+
+		// Scan the next value
+		ok, err = scanners[0].next()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			// This scanner doesn't have any more lines, so remove from the slice
+			scanners = scanners[1:]
+		}
+	}
+
+	// Flush all remaining bytes to the file
+	return writer.Flush()
+}
+
+type sortableScanner struct {
+	token   string
+	scanner *bufio.Scanner
+	f       *os.File
+}
+
+func (ss *sortableScanner) next() (bool, error) {
+	if ss.scanner.Scan() {
+		ss.token = ss.scanner.Text()
+		return true, nil
+	}
+	// There is an error, or the end of the file has been reached, so delete the temporary file
+	ss.f.Close()
+	os.Remove(ss.f.Name())
+
+	// Return the error
+	return false, ss.scanner.Err()
 }
