@@ -1,7 +1,7 @@
-// Package github.com/veqryn/string-dedup/cmd can be run to deduplicate string data. To run:
-// 	go run github.com/veqryn/string-dedup/cmd
+// Package github.com/veqryn/dedup/cmd can be run to deduplicate string data. To run:
+// 	go run github.com/veqryn/dedup/cmd
 // or
-// 	go build -o ./dedup github.com/veqryn/string-dedup/cmd
+// 	go build -o ./dedup github.com/veqryn/dedup/cmd
 // 	./dedup --in=testdata/testdata.log --out=deduped.log
 package main
 
@@ -10,7 +10,7 @@ import (
 	"log"
 	"os"
 
-	dedup "github.com/veqryn/string-dedup"
+	"github.com/veqryn/dedup"
 )
 
 func main() {

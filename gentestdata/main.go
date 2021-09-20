@@ -1,8 +1,8 @@
-// Package github.com/veqryn/string-dedup/gentestdata can be run to generate test data
+// Package github.com/veqryn/dedup/gentestdata can be run to generate test data
 // consisting of a file containing random strings. To run:
-// 	go run github.com/veqryn/string-dedup/gentestdata
+// 	go run github.com/veqryn/dedup/gentestdata
 // or
-// 	go build -o ./gen_test_data github.com/veqryn/string-dedup/gentestdata
+// 	go build -o ./gen_test_data github.com/veqryn/dedup/gentestdata
 // 	./gen_test_data --file=testdata.log
 package main
 

@@ -1,4 +1,4 @@
-# string-dedup
+# dedup
 Deduplicate string data
 
 ### How to execute
@@ -9,7 +9,7 @@ The main executable is located in the `cmd/` dir, and it has the following flags
 
 How to compile and run:
 * `cd <repo-directory>`
-* `go build -o ./dedup github.com/veqryn/string-dedup/cmd`
+* `go build -o ./dedup github.com/veqryn/dedup/cmd`
 * `./dedup --in=testdata/testdata.log --out=deduped.log`
 
 ### Input and Output format

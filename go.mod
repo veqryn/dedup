@@ -1,3 +1,3 @@
-module github.com/veqryn/string-dedup
+module github.com/veqryn/dedup
 
 go 1.17

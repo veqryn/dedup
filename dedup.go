@@ -1,4 +1,4 @@
-// Package dedup (github.com/veqryn/string-dedup) is a program to remove duplicate strings/URL's.
+// Package dedup (github.com/veqryn/dedup) is a program to remove duplicate strings/URL's.
 // 	Assumptions:
 // 	* Strings/URL's are all valid and UTF-8
 // 	* Duplicate is defined as an exact match
