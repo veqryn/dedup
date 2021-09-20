@@ -17,7 +17,7 @@ func main() {
 	// Flags
 	inFileLoc := flag.String("in", "testdata.log", "input file location")
 	outFileLoc := flag.String("out", "deduped.log", "output file location")
-	maxTmpFileLines := flag.Uint("max-tmp-file-lines", 1000000, "maximum temporary file line count")
+	avgTmpFileBytes := flag.Int64("tmp-file-bytes", 100000000, "average temporary file byte size")
 	flag.Parse()
 
 	if inFileLoc == nil || *inFileLoc == "" {
@@ -26,8 +26,8 @@ func main() {
 	if outFileLoc == nil || *outFileLoc == "" {
 		log.Fatal("out flag must be non-empty or omitted for the default")
 	}
-	if maxTmpFileLines == nil || *maxTmpFileLines == 0 {
-		log.Fatal("maxTmpFileLines flag must be a positive integer or omitted for the default")
+	if avgTmpFileBytes == nil || *avgTmpFileBytes <= 0 {
+		log.Fatal("avgTmpFileBytes flag must be a positive integer or omitted for the default")
 	}
 
 	// Open input file for reading
@@ -46,7 +46,7 @@ func main() {
 
 	// Dedup
 	log.Println("Starting dedup...")
-	err = dedup.Dedup(inFile, outFile, *maxTmpFileLines)
+	err = dedup.Dedup(inFile, outFile, *avgTmpFileBytes)
 	if err != nil {
 		log.Fatal(err)
 	}
