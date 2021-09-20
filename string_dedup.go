@@ -13,10 +13,12 @@ import (
 	"os"
 )
 
-// Dedup is given a file to read from, and a file to write to. It will then de-duplicate strings/URL's
-// by splitting the input file into smaller temporary files, deduplicating each file into additional
-// temporary files, then merge the deduplicated files into a large one while deduplicating it.
+// Dedup is given a file to read from, and a file to write to. It will then de-duplicatestrings/URL's
+// by splitting the input file into smaller temporary files (as defined by maxTmpFileLines),
+// deduplicating each file into additional temporary files, then merge the deduplicated files into a
+// large one while deduplicating it.
 func Dedup(inFile, outFile *os.File, maxTmpFileLines uint) error {
+
 	// Split file into smaller ones
 	chunks, err := split(inFile, maxTmpFileLines)
 	if err != nil {

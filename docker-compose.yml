@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  builder:
+    image: "golang:1.17.1-bullseye"
+    entrypoint: /bin/sh
+    command:
+      - "-cexu"
+      - >-
+        cd /go/src/github.com/veqryn/string-dedup &&
+        go build -o ./tmp/dedup_linux64 github.com/veqryn/string-dedup/cmd &&
+        ./tmp/dedup_linux64 --in=./testdata/testdata.log --out=./tmp/deduped.log
+    volumes:
+      - ".:/go/src/github.com/veqryn/string-dedup"

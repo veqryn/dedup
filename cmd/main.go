@@ -14,6 +14,7 @@ import (
 )
 
 func main() {
+	// Flags
 	inFileLoc := flag.String("in", "testdata.log", "input file location")
 	outFileLoc := flag.String("out", "deduped.log", "output file location")
 	maxTmpFileLines := flag.Uint("max-tmp-file-lines", 1000000, "maximum temporary file line count")
@@ -29,23 +30,25 @@ func main() {
 		log.Fatal("maxTmpFileLines flag must be a positive integer or omitted for the default")
 	}
 
+	// Open input file for reading
 	inFile, err := os.Open(*inFileLoc)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer inFile.Close()
 
+	// Create output file for writing
 	outFile, err := os.OpenFile(*outFileLoc, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer outFile.Close()
 
+	// Dedup
 	log.Println("Starting dedup...")
 	err = dedup.Dedup(inFile, outFile, *maxTmpFileLines)
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	log.Println("Success!")
 }
