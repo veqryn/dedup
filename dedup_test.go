@@ -15,18 +15,18 @@ func TestDedup(t *testing.T) {
 
 	outFile, err := os.CreateTemp("", "dedup.test.*.log")
 	if err != nil {
-		t.Fatal()
+		t.Fatal(err)
 	}
 	defer os.Remove(outFile.Name())
 	defer outFile.Close()
 
 	// testdata.log has 100 distinct lines, 204 total lines. Try to dedup 20 lines at a time
-	err = Dedup(inFile, outFile, 20*50)
+	err = Dedup(outFile, 20*50, inFile)
 	if err != nil {
-		t.Fatal()
+		t.Fatal(err)
 	}
 
-	// Seed to the beginning of the file to start reading from the beginning
+	// Seek to the beginning of the file to start reading from the beginning
 	_, err = outFile.Seek(0, 0)
 	if err != nil {
 		t.Fatal(err)

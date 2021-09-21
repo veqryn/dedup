@@ -17,7 +17,8 @@ func main() {
 	// Flags
 	inFileLoc := flag.String("in", "testdata.log", "input file location")
 	outFileLoc := flag.String("out", "deduped.log", "output file location")
-	avgTmpFileBytes := flag.Int64("tmp-file-bytes", 100000000, "average temporary file byte size")
+	avgTmpFileBytes := flag.Int64("tmp-file-bytes", 250000000,
+		"max temporary file byte size. app will use 2-5x more memory than this to run")
 	flag.Parse()
 
 	if inFileLoc == nil || *inFileLoc == "" {
@@ -46,7 +47,7 @@ func main() {
 
 	// Dedup
 	log.Println("Starting dedup...")
-	err = dedup.Dedup(inFile, outFile, *avgTmpFileBytes)
+	err = dedup.Dedup(outFile, *avgTmpFileBytes, inFile)
 	if err != nil {
 		log.Fatal(err)
 	}
