@@ -3,7 +3,7 @@
 // 	* Strings/URL's are all valid and UTF-8
 // 	* Duplicate is defined as an exact match
 // 	* Input and output will be new-line delimited files
-// 	* Average line count of the file will be greater than 10 billion (>= 1 terrabyte) and too large for memory
+// 	* Line count of the file can be greater than 10 billion (>= 1 terrabyte), too large for memory
 // 	* Average string/URL length is around 100 characters
 // 	* Unlimited disk space
 package dedup
@@ -18,26 +18,66 @@ const defaultBufferSize int = 256 * 1024 // 256 kb
 
 var delimiter byte = "\n"[0]
 
-// Dedup is given a file to read from, a file to write to, and the average temporary file size
-// for when it needs to spill to disk. It will de-duplicate strings/URL's by reading the input file
-// into a set, and writing out the set to a temporary file each time the set approaches avgTmpFileBytes
-// in size. It will then merge the temporary files while deduplicating the lines, into the final file.
-func Dedup(inFile, outFile *os.File, avgTmpFileBytes int64) error {
+//
+// Implementation Design:
+// When the deduplicated content is larger in bytes than our machine's memory, we will not be able
+// to hold the final file in memory. This presents a problem: even if we split the input file and
+// deduplicate each chunk, how do we recombine without allowing duplicates if we cannot hold the
+// chunks all in memory at the same time.
+// The solution chosen for this implementation deduplicates AND sorts the chucks before writing
+// them. Then, when the chunks are being merged again, we need only read the first line from each
+// chunk, and compare it against the first line from all other chunks. Whichever line would come
+// first lexicographically will be written to the output (merged) file. We are guaranteed that
+// by doing so, the merge algorithm will see any duplicates between the files in sequence, and we
+// deduplicate by skipping all but the first.
+// The resulting output (merged) file is then fully deduplicated, and it is also sorted as a
+// side effect of choosing this implementation.
+// A second side benefit of this implementation is that this program can be run against an input
+// file of arbitrary size (>petabytes) and it can run using very little memory (<megabyte),
+// though more memory allocated to it will speed up its run time. Setting the memory to be
+// larger than the final output file's size, will cut the run time by at least half and remove the
+// need to split the input file into chunks or create any temporary files.
+//
 
-	chunks, err := splitSortDeduplicate(inFile, outFile, avgTmpFileBytes)
+// Dedup is given a file to write to, a file to read from, and the temporary file size
+// for when it needs to spill to disk. It will de-duplicate strings/URL's by reading the input file
+// into a set, and writing out the set to a temporary file each time the set approaches tmpFileBytes
+// in size. It will then merge the temporary files while deduplicating the lines, into the final file.
+func Dedup(outFile *os.File, tmpFileBytes int64, inFile *os.File) error {
+	// Write out chunks
+	chunks, err := splitSortDeduplicate(outFile, tmpFileBytes, inFile)
+
+	// No matter how or when we exit, cleanup all temporary files
+	defer func(chunks []*os.File) {
+		for _, chunk := range chunks {
+			// Only cleanup files this package created, do not cleanup the outfile (we didn't create it)
+			if chunk != outFile {
+				chunk.Close()
+				os.Remove(chunk.Name())
+			}
+		}
+	}(chunks)
+
+	// Handle error from splitSortDeduplicate
 	if err != nil {
 		return err
 	}
 
-	// If the input file was empty, exit
-	if len(chunks) < 1 {
+	// No need to merge anything if the input file was empty,
+	// or we were able to fit it in memory and wrote everything directly to the output file already
+	if len(chunks) <= 1 {
 		return nil
 	}
 
-	return mergeChunks(chunks, outFile)
+	return mergeChunks(outFile, chunks)
 }
 
-func splitSortDeduplicate(inFile, outFile *os.File, avgTmpFileBytes int64) ([]*os.File, error) {
+// splitSortDeduplicate reads in the input file, and deduplicates the lines as it reads them in.
+// If the total size of the deduplicated lines exceeds tmpFileBytes, it will begin writing out
+// the sets as sorted chunks to temporary files. If the size doesn't exceed tmpFileBytes,
+// it will write the full sorted deduplicated set to the output file.
+// It returns all files it wrote to.
+func splitSortDeduplicate(outFile *os.File, tmpFileBytes int64, inFile *os.File) ([]*os.File, error) {
 	// Create a scanner to buffer the input file and read in line tokens
 	scanner := bufio.NewScanner(inFile)
 
@@ -55,23 +95,37 @@ func splitSortDeduplicate(inFile, outFile *os.File, avgTmpFileBytes int64) ([]*o
 		currentLen  int
 	)
 
-	// Read lines from the scanner one by one, putting them into the set
-	for scanner.Scan() {
-		// Add to the set
+	// Advance the scanner to the next token
+	hasNext := scanner.Scan()
+	if !hasNext {
+		return nil, scanner.Err()
+	}
+
+	// Loop until the file is finished
+	for {
+		// Read the token in and add to the set
 		line := scanner.Text()
 		set[line] = struct{}{}
+
+		// Peek ahead to see if there are more tokens, or exit loop if the file is finished
+		hasNext = scanner.Scan()
+		if !hasNext {
+			break
+		}
 
 		// The length of a map is stored in the map (in golang), so the operation is nearly free
 		currentLen = len(set)
 
-		// If the length of the set increased, add the byte length of the string to the memory counter
+		// If the length of the set increased, add the byte length of the string to the memory counter,
+		// plus one for a new line
 		if currentLen > previousLen {
-			bytesUsed += int64(len(line))
+			bytesUsed += int64(len(line)) + 1
 
-			// If the total bytes of all distinct strings in the set are greater than we want, spill to a new temp file
-			if bytesUsed >= avgTmpFileBytes {
+			// If the total bytes of all distinct strings in the set, plus the upcoming line,
+			// are equal or greater than what we want, then spill to a new temp file
+			if bytesUsed+int64(len(scanner.Bytes()))+1 >= tmpFileBytes {
 				// Create a new temporary file
-				chunkFile, err := os.CreateTemp("", "deduped.*.log")
+				chunkFile, err := os.CreateTemp("", "dedup.*.log")
 				if err != nil {
 					return chunks, err
 				}
@@ -96,15 +150,16 @@ func splitSortDeduplicate(inFile, outFile *os.File, avgTmpFileBytes int64) ([]*o
 		return chunks, err
 	}
 
-	// If there are no more strings, return
-	if len(set) == 0 {
-		return chunks, nil
-	}
-
-	// Create a new temporary file
-	finalChunk, err := os.CreateTemp("", "deduped.*.log")
-	if err != nil {
-		return chunks, err
+	// There is at least one string left in the set.
+	// If no temporary files have been created, it means all the deduplicated strings fit into
+	// memory, and we can write directly to the output file without having to make temporary chunks
+	finalChunk := outFile
+	if len(chunks) > 0 {
+		// If we have already made other temporary files, then we have to make another
+		finalChunk, err = os.CreateTemp("", "dedup.*.log")
+		if err != nil {
+			return chunks, err
+		}
 	}
 	chunks = append(chunks, finalChunk)
 
@@ -112,8 +167,8 @@ func splitSortDeduplicate(inFile, outFile *os.File, avgTmpFileBytes int64) ([]*o
 	return chunks, writeSlice(finalChunk, sortKeys(set))
 }
 
+// sortKeys takes a map and puts the keys into a sorted slice
 func sortKeys(set map[string]struct{}) []string {
-	// Put into an array/slice so it can be sorted
 	slice := make([]string, len(set))
 	i := 0
 	for k := range set {
@@ -126,6 +181,7 @@ func sortKeys(set map[string]struct{}) []string {
 	return slice
 }
 
+// writeSlice writes all strings in the slice to the file, delimited by a new line
 func writeSlice(f *os.File, slice []string) error {
 	// Buffer the writes
 	writer := bufio.NewWriterSize(f, defaultBufferSize)
@@ -151,55 +207,60 @@ func writeSlice(f *os.File, slice []string) error {
 	return writer.Flush()
 }
 
-func mergeChunks(chunks []*os.File, outFile *os.File) error {
+// mergeChunks merges and deduplicates the chunk files into the output file
+func mergeChunks(outFile *os.File, chunks []*os.File) error {
 	// Create a slice of buffered scanners for each chunk
 	scanners := make([]*sortableScanner, 0, len(chunks))
-	var ok bool
-	var err error
 
-	// No matter how we exit, cleanup all remaining temporary files
-	defer func() {
-		for _, ss := range scanners {
-			ss.f.Close()
-			os.Remove(ss.f.Name())
-		}
-	}()
-
-	// Initialize and add sorted scanners
+	// Add sorted scanners to the slice
 	for _, chunk := range chunks {
-		// Seed to the beginning of the file to start reading from the beginning
-		_, err = chunk.Seek(0, 0)
-		if err != nil {
-			return err
-		}
-
-		// Use default buffer size since we may have many chunks
 		ss := &sortableScanner{
-			scanner: bufio.NewScanner(chunk),
+			scanner: bufio.NewScanner(chunk), // Use default buffer size since there are many chunks
 			f:       chunk,
 		}
+		scanners = append(scanners, ss)
 
-		// Scan the next value
-		ok, err = ss.next()
+		// Seek to the beginning of the file to start reading again from the start
+		_, err := ss.f.Seek(0, 0)
 		if err != nil {
 			return err
 		}
 
-		// If the file has content, add to the slice
-		if ok {
-			scanners = append(scanners, ss)
+		// Scan the next token
+		ok, err := ss.next()
+		if err != nil {
+			return err
+		}
+
+		// Assert that there is content (every file guaranteed to have at least one line in it)
+		if !ok {
+			panic(ss.f.Name() + " has no content")
 		}
 	}
 
-	// Create function to sort the scanners
+	return mergeSortableScanners(outFile, scanners)
+}
+
+// mergeSortableScanners reads a single token from each of the chunks, then chooses which one comes first
+// lexicographically, and writes that to a buffer. It then reads new token for that chunk, and
+// chooses again, repeating this process until all lines have been read from all chunks.
+// To deduplicate, it remembers the previous line written to the output file, and if the next line
+// is equal then it is skipped. This works because all the chunk files are sorted already, so it is
+// guaranteed that all duplicates will be seen together as it reads from the chunks.
+func mergeSortableScanners(outFile *os.File, scanners []*sortableScanner) error {
+	// Create function to sort the scanners by their token, lexicographically by their bytes
 	sortScanners := func(i, j int) bool {
 		return scanners[i].token < scanners[j].token
 	}
 
 	// Create a buffered writer
 	writer := bufio.NewWriterSize(outFile, defaultBufferSize)
-	var previousLine string
-	var hasPrevious bool
+	var (
+		previousLine string
+		hasPrevious  bool
+		ok           bool
+		err          error
+	)
 
 	// Loop until there aren't any scanners left
 	for len(scanners) > 0 {
@@ -208,7 +269,8 @@ func mergeChunks(chunks []*os.File, outFile *os.File) error {
 			sort.Slice(scanners, sortScanners)
 		}
 
-		// Pull the top token string, and compare to the previous line
+		// Pull the top token string, and compare to the previous line.
+		// If it matches the previous line, it is a duplicate we can skip.
 		if !hasPrevious || previousLine != scanners[0].token {
 			// Write to the output buffer
 			_, err = writer.WriteString(scanners[0].token)
@@ -240,21 +302,23 @@ func mergeChunks(chunks []*os.File, outFile *os.File) error {
 	return writer.Flush()
 }
 
+// sortableScanner is a struct containing the latest token string read in from the file,
+// as well as the file and scanner objects. It has methods to obtain the next token,
+// and the whole struct can easily be sorted in a slice based off the token.
 type sortableScanner struct {
 	token   string
 	scanner *bufio.Scanner
 	f       *os.File
 }
 
+// next scans the next token string in the file, and sets it to the sortableScanner's token field.
+// It returns true if this was successful, false if the end of the file was reached or an error.
 func (ss *sortableScanner) next() (bool, error) {
 	if ss.scanner.Scan() {
 		ss.token = ss.scanner.Text()
 		return true, nil
 	}
-	// There is an error, or the end of the file has been reached, so delete the temporary file
-	ss.f.Close()
-	os.Remove(ss.f.Name())
 
-	// Return the error
+	// Return any error
 	return false, ss.scanner.Err()
 }
