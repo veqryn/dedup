@@ -42,7 +42,7 @@ func main() {
 	defer f.Close()
 
 	// Buffer the writes, make sure to flush when done
-	w := bufio.NewWriter(f)
+	w := bufio.NewWriterSize(f, 256*1024)
 	defer w.Flush()
 
 	// Create a new random source

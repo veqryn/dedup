@@ -15,8 +15,8 @@ import (
 
 func main() {
 	// Flags
-	inFileLoc := flag.String("in", "testdata.log", "input file location")
-	outFileLoc := flag.String("out", "deduped.log", "output file location")
+	inFileLoc := flag.String("in", "", "input file location")
+	outFileLoc := flag.String("out", "", "output file location")
 	avgTmpFileBytes := flag.Int64("tmp-file-bytes", 250000000,
 		"max temporary file byte size. app will use 2-5x more memory than this to run")
 	flag.Parse()
