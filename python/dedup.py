@@ -2,6 +2,7 @@
 """
 
 import argparse
+import typing
 
 
 def main():
@@ -21,21 +22,23 @@ def main():
         return
 
     print("Starting dedup...")
+    with open(args.out_, "w") as out_file, open(args.in_, "r") as in_file:
+        dedup(out_file, in_file)
+    print("Success!")
 
+
+def dedup(out_file: typing.TextIO, in_file: typing.TextIO):
     # Create a set, and write every line from the input file to it
     distinct = set()
-    with open(args.in_, "r") as in_file:
-        for line in in_file:
-            # Remove the trailing new line, both to save space and because
-            # we still need to dedup the last line, which may not have it
-            distinct.add(line.rstrip("\n"))
+    for line in in_file:
+        # Remove the trailing new line, both to save space and because
+        # we still need to dedup the last line, which may not have it
+        distinct.add(line.rstrip("\n"))
 
     # Write the set to the output file, appending new lines
-    with open(args.out_, "w") as out_file:
-        for line in distinct:
-            out_file.write(line + "\n")
-
-    print("Success!")
+    for line in distinct:
+        out_file.write(line + "\n")
+    out_file.flush()
 
 
 if __name__ == "__main__":
