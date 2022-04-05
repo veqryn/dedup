@@ -13,6 +13,12 @@ func TestDedup(t *testing.T) {
 	}
 	defer inFile.Close()
 
+	inFileAgain, err := os.Open("testdata/testdata.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFileAgain.Close()
+
 	outFile, err := os.CreateTemp("", "dedup.test.*.log")
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +27,7 @@ func TestDedup(t *testing.T) {
 	defer outFile.Close()
 
 	// testdata.log has 100 distinct lines, 204 total lines. Try to dedup 20 lines at a time
-	err = Dedup(outFile, 20*50, inFile)
+	err = Dedup(outFile, 20*50, inFile, inFileAgain)
 	if err != nil {
 		t.Fatal(err)
 	}
