@@ -64,7 +64,7 @@ func Dedup(outFile *os.File, tmpFileBytes int64, inFile, inFileAgain io.Reader) 
 				fmt.Println("Error counting lines")
 				return
 			}
-			fmt.Println("Counted lines:", goal)
+			fmt.Println("Finished counting lines:", goal)
 			goal *= 2 // Have to write or ignore every line we've read
 			digits := int(math.Floor(math.Log10(float64(goal)) + 1))
 			ticker := time.NewTicker(60 * time.Second)
@@ -74,7 +74,8 @@ func Dedup(outFile *os.File, tmpFileBytes int64, inFile, inFileAgain io.Reader) 
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					fmt.Printf("Progress: %*d/%d\n", digits, atomic.LoadUint64(&progress), goal)
+					prog := atomic.LoadUint64(&progress)
+					fmt.Printf("Progress: %*d/%d=%d%%\n", digits, prog, goal, prog*100/goal)
 				}
 			}
 		}()
@@ -112,23 +113,35 @@ func Dedup(outFile *os.File, tmpFileBytes int64, inFile, inFileAgain io.Reader) 
 // countLines returns the number of lines in a file
 func countLines(r io.Reader) (uint64, error) {
 	buf := make([]byte, defaultBufferSize)
+
 	var count uint64
+	var totalCount uint64
+	var progress uint64
+
 	lineSep := []byte{'\n'}
 	var last byte
+
 	for {
 		c, err := r.Read(buf)
-		count += uint64(bytes.Count(buf[:c], lineSep))
+		count = uint64(bytes.Count(buf[:c], lineSep))
+		totalCount += count
+		progress += count
+		if progress >= 100000000 {
+			progress = 0
+			fmt.Println("Counted lines:", totalCount)
+		}
+
 		if c > 0 {
 			last = buf[c-1]
 		}
 		if err == io.EOF {
 			if last != '\n' {
-				count++ // final line
+				totalCount++ // final line
 			}
-			return count, nil
+			return totalCount, nil
 		}
 		if err != nil {
-			return count, err
+			return totalCount, err
 		}
 	}
 }

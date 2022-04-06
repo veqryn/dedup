@@ -7,21 +7,37 @@ package main
 
 import (
 	"flag"
+	"io"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/veqryn/dedup"
 )
 
+// arrayFlags lets you set a flag multiple times
+type arrayFlags []string
+
+func (i *arrayFlags) String() string {
+	return strings.Join(*i, string(os.PathListSeparator))
+}
+
+func (i *arrayFlags) Set(value string) error {
+	*i = append(*i, value)
+	return nil
+}
+
 func main() {
 	// Flags
-	inFileLoc := flag.String("in", "", "input file location")
+	var inFileLoc arrayFlags
+	flag.Var(&inFileLoc, "in", "input file location (can be used multiple times)")
 	outFileLoc := flag.String("out", "", "output file location")
 	tmpFileBytes := flag.Int64("tmp-file-bytes", 250000000,
 		"max temporary file byte size. app will use 2-5x more memory than this to run")
+	appendFlag := flag.Bool("append", false, "should append to file (default: only allow new files)")
 	flag.Parse()
 
-	if inFileLoc == nil || *inFileLoc == "" {
+	if inFileLoc == nil || len(inFileLoc) == 0 {
 		log.Fatal("in flag must be non-empty or omitted for the default")
 	}
 	if outFileLoc == nil || *outFileLoc == "" {
@@ -32,21 +48,35 @@ func main() {
 	}
 
 	// Open input file for reading
-	inFile, err := os.Open(*inFileLoc)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer inFile.Close()
+	var inFiles []io.Reader
+	var progressFiles []io.Reader
+	for _, fileLoc := range inFileLoc {
+		inFile, err := os.Open(fileLoc)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer inFile.Close()
+		inFiles = append(inFiles, inFile)
 
-	// Open input file again to track progress
-	inFileAgain, err := os.Open(*inFileLoc)
-	if err != nil {
-		log.Fatal(err)
+		// Open input file again to track progress
+		progressFile, err := os.Open(fileLoc)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer progressFile.Close()
+		progressFiles = append(progressFiles, progressFile)
 	}
-	defer inFileAgain.Close()
+	inReader := io.MultiReader(inFiles...)
+	progressReader := io.MultiReader(progressFiles...)
 
 	// Create output file for writing
-	outFile, err := os.OpenFile(*outFileLoc, os.O_CREATE|os.O_WRONLY, 0644)
+	var fileOpts int
+	if appendFlag != nil && *appendFlag {
+		fileOpts = os.O_CREATE | os.O_APPEND | os.O_WRONLY
+	} else {
+		fileOpts = os.O_CREATE | os.O_EXCL | os.O_WRONLY
+	}
+	outFile, err := os.OpenFile(*outFileLoc, fileOpts, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -54,7 +84,7 @@ func main() {
 
 	// Dedup
 	log.Println("Starting dedup...")
-	err = dedup.Dedup(outFile, *tmpFileBytes, inFile, inFileAgain)
+	err = dedup.Dedup(outFile, *tmpFileBytes, inReader, progressReader)
 	if err != nil {
 		log.Fatal(err)
 	}
