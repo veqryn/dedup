@@ -169,7 +169,6 @@ func splitSortDeduplicate(outFile *os.File, tmpFileBytes uint64, skipPatterns []
 		previousLen int
 		currentLen  int
 		lineCount   uint64
-		lineNum     uint64
 	)
 
 	// Advance the scanner to the next token
@@ -185,7 +184,6 @@ loop:
 		line := scanner.Text()
 		hasNext = scanner.Scan() // Peak ahead
 		lineCount++
-		lineNum++
 
 		// Skip lines
 		for _, pattern := range skipPatterns {
