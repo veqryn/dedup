@@ -16,6 +16,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"regexp"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -50,7 +51,7 @@ var delimiter byte = "\n"[0]
 // for when it needs to spill to disk. It will de-duplicate strings/URL's by reading the input file
 // into a set, and writing out the set to a temporary file each time the set approaches tmpFileBytes
 // in size. It will then merge the temporary files while deduplicating the lines, into the final file.
-func Dedup(outFile *os.File, tmpFileBytes int64, inFile, inFileAgain io.Reader) error {
+func Dedup(outFile *os.File, tmpFileBytes uint64, skipPatterns []*regexp.Regexp, inFile, inFileAgain io.Reader) error {
 	// Allow cancellation of progress tracker
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,7 +83,7 @@ func Dedup(outFile *os.File, tmpFileBytes int64, inFile, inFileAgain io.Reader) 
 	}
 
 	// Write out chunks
-	chunks, err := splitSortDeduplicate(outFile, tmpFileBytes, inFile, &progress)
+	chunks, err := splitSortDeduplicate(outFile, tmpFileBytes, skipPatterns, &progress, inFile)
 
 	// No matter how or when we exit, cleanup all temporary files
 	defer func(chunks []*os.File) {
@@ -107,7 +108,7 @@ func Dedup(outFile *os.File, tmpFileBytes int64, inFile, inFileAgain io.Reader) 
 	}
 
 	fmt.Println("Merging temporary files into:", outFile.Name())
-	return mergeChunks(outFile, chunks, &progress)
+	return mergeChunks(outFile, &progress, chunks)
 }
 
 // countLines returns the number of lines in a file
@@ -151,7 +152,7 @@ func countLines(r io.Reader) (uint64, error) {
 // the sets as sorted chunks to temporary files. If the size doesn't exceed tmpFileBytes,
 // it will write the full sorted deduplicated set to the output file.
 // It returns all files it wrote to.
-func splitSortDeduplicate(outFile *os.File, tmpFileBytes int64, inFile io.Reader, progress *uint64) ([]*os.File, error) {
+func splitSortDeduplicate(outFile *os.File, tmpFileBytes uint64, skipPatterns []*regexp.Regexp, progress *uint64, inFile io.Reader) ([]*os.File, error) {
 	// Create a scanner to buffer the input file and read in line tokens
 	scanner := bufio.NewScanner(inFile)
 
@@ -164,10 +165,11 @@ func splitSortDeduplicate(outFile *os.File, tmpFileBytes int64, inFile io.Reader
 	// Create counters and a slice of temporary files being created
 	var (
 		chunks      []*os.File
-		bytesUsed   int64
+		bytesUsed   uint64
 		previousLen int
 		currentLen  int
 		lineCount   uint64
+		lineNum     uint64
 	)
 
 	// Advance the scanner to the next token
@@ -177,23 +179,35 @@ func splitSortDeduplicate(outFile *os.File, tmpFileBytes int64, inFile io.Reader
 	}
 
 	// Loop until the file is finished
+loop:
 	for {
 		// Read the token in and add to the set
 		line := scanner.Text()
-		set[line] = struct{}{}
+		hasNext = scanner.Scan() // Peak ahead
 		lineCount++
+		lineNum++
+
+		// Skip lines
+		for _, pattern := range skipPatterns {
+			if pattern.MatchString(line) {
+				lineCount++ // One more line that doesn't have to be written
+				continue loop
+			}
+		}
+
+		// This is what is written, to chunks or to the output file directly
+		set[line] = struct{}{}
 
 		// The length of a map is stored in the map (in golang), so the operation is nearly free
 		currentLen = len(set)
 
 		// Peek ahead to see if there are more tokens, or exit loop if the file is finished
-		hasNext = scanner.Scan()
 		if !hasNext {
 			if currentLen == previousLen {
-				lineCount++
+				lineCount++ // One more line that doesn't have to be written
 			}
 			atomic.AddUint64(progress, lineCount)
-			break
+			break loop
 		}
 		if lineCount >= 1000 {
 			atomic.AddUint64(progress, lineCount)
@@ -203,11 +217,11 @@ func splitSortDeduplicate(outFile *os.File, tmpFileBytes int64, inFile io.Reader
 		// If the length of the set increased, add the byte length of the string to the memory counter,
 		// plus one for a new line
 		if currentLen > previousLen {
-			bytesUsed += int64(len(line)) + 1
+			bytesUsed += uint64(len(line)) + 1
 
 			// If the total bytes of all distinct strings in the set, plus the upcoming line,
 			// are equal or greater than what we want, then spill to a new temp file
-			if bytesUsed+int64(len(scanner.Bytes()))+1 > tmpFileBytes {
+			if bytesUsed+uint64(len(scanner.Bytes()))+1 > tmpFileBytes {
 				// Create a new temporary file
 				chunkFile, err := os.CreateTemp("", "dedup.*.log")
 				if err != nil {
@@ -310,7 +324,7 @@ func writeSlice(f *os.File, slice []string, progress *uint64) error {
 }
 
 // mergeChunks merges and deduplicates the chunk files into the output file
-func mergeChunks(outFile *os.File, chunks []*os.File, progress *uint64) error {
+func mergeChunks(outFile *os.File, progress *uint64, chunks []*os.File) error {
 	// Create a slice of buffered scanners for each chunk
 	scanners := make([]*sortableScanner, 0, len(chunks))
 
@@ -340,7 +354,7 @@ func mergeChunks(outFile *os.File, chunks []*os.File, progress *uint64) error {
 		}
 	}
 
-	return mergeSortableScanners(outFile, scanners, progress)
+	return mergeSortableScanners(outFile, progress, scanners)
 }
 
 // mergeSortableScanners reads a single token from each of the chunks, then chooses which one comes first
@@ -349,7 +363,7 @@ func mergeChunks(outFile *os.File, chunks []*os.File, progress *uint64) error {
 // To deduplicate, it remembers the previous line written to the output file, and if the next line
 // is equal then it is skipped. This works because all the chunk files are sorted already, so it is
 // guaranteed that all duplicates will be seen together as it reads from the chunks.
-func mergeSortableScanners(outFile *os.File, scanners []*sortableScanner, progress *uint64) error {
+func mergeSortableScanners(outFile *os.File, progress *uint64, scanners []*sortableScanner) error {
 	// Create function to sort the scanners by their token, lexicographically by their bytes
 	sortScanners := func(i, j int) bool {
 		return scanners[i].token < scanners[j].token

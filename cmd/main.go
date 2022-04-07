@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/veqryn/dedup"
@@ -30,9 +31,11 @@ func (i *arrayFlags) Set(value string) error {
 func main() {
 	// Flags
 	var inFileLoc arrayFlags
-	flag.Var(&inFileLoc, "in", "input file location (can be used multiple times)")
+	var skipPatterns arrayFlags
+	flag.Var(&inFileLoc, "in", "input file location (flag can be used multiple times)")
+	flag.Var(&skipPatterns, "skip-pattern", "re2 regex pattern that will skip the line if it matches (flag can be used multiple times)")
 	outFileLoc := flag.String("out", "", "output file location")
-	tmpFileBytes := flag.Int64("tmp-file-bytes", 250000000,
+	tmpFileBytes := flag.Uint64("tmp-file-bytes", 250000000,
 		"max temporary file byte size. app will use 2-5x more memory than this to run")
 	appendFlag := flag.Bool("append", false, "should append to file (default: only allow new files)")
 	flag.Parse()
@@ -45,6 +48,16 @@ func main() {
 	}
 	if tmpFileBytes == nil || *tmpFileBytes <= 0 {
 		log.Fatal("tmp-file-bytes flag must be a positive integer or omitted for the default")
+	}
+
+	// Compile regexp's
+	var skipPatternsCompiled []*regexp.Regexp
+	for _, pattern := range skipPatterns {
+		re2, err := regexp.Compile(pattern)
+		if err != nil {
+			log.Fatal(err)
+		}
+		skipPatternsCompiled = append(skipPatternsCompiled, re2)
 	}
 
 	// Open input file for reading
@@ -84,7 +97,7 @@ func main() {
 
 	// Dedup
 	log.Println("Starting dedup...")
-	err = dedup.Dedup(outFile, *tmpFileBytes, inReader, progressReader)
+	err = dedup.Dedup(outFile, *tmpFileBytes, skipPatternsCompiled, inReader, progressReader)
 	if err != nil {
 		log.Fatal(err)
 	}
